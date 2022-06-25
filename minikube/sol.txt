@@ -1,0 +1,11 @@
+minikube start 
+minikube -p minikube docker-env
+eval $(minikube -p minikube docker-env)
+kubectl create namespace dev 
+cd ${HOME}/.kube
+openssl genrsa -out emp.key 2048
+openssl req -new -key emp.key  -out emp.csr -subj "/CN=emp/O=dev"
+[in case of error /etc/ssl/)
+openssl x509 -req -in emp.csr -CA ${HOME}/.minikube/ca.crt -CAkey ${HOME}/.minikube/ca.key -CAcreateserial -out emp.crt -days 700
+kubectl config set-credentials emp --client-certificate --client-key
+kubectl config set-context dev-ctx --cluster --namespace --user 

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Secret
+metadata:
+ name: fresco-secret
+stringData:
+  user: admin
+  pass: pass
