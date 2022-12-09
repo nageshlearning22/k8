@@ -1,0 +1,165 @@
+How to Setup Role Based Access (RBAC) to Kubernetes Cluster
+Vivek Singh
+Vivek Singh
+Jan 6th, 2020
+If you are working on Kubernetes for some time, you may have faced a scenario where you have to give some users limited access to your Kubernetes cluster. For example, you may want a user, say Alice from development, to have access only to some resources that are in the development namespace and nothing else. To achieve this type of RBAC (role based access control) in Kubernetes, we use the concept of Authentication and Authorization (A&A).
+
+Broadly, there are three kinds of users that need access to a Kubernetes cluster:
+
+1. Developers/Admins:
+Users that are responsible to do administrative or developmental tasks on the cluster. This includes operations like upgrading the cluster or creating the resources/workloads on the cluster.
+
+2. End users:
+Users that access the applications deployed on our Kubernetes cluster. RBAC restrictions for these users are managed by the applications themselves. For example, a web application running on Kubernetes cluster, will have its own security mechanism in place, to prevent unauthorized access.
+
+3. Applications/Bots:
+There is a possibility that other applications need access to Kubernetes cluster, typically to talk to resources or workloads inside the cluster. Kubernetes facilitates this by using Service Accounts, which is a topic for another post. In this blog post, we are going to focus on Kubernetes RBAC (Role Based Access Control).
+
+So the category of users that can be managed with RBAC is developers/admins. In a nutshell, when using RBAC, you would create users and assign them RBAC roles. Each role is mapped with certain authorizations, thus restricting each user to a set of actions defined by the RBAC roles they are assigned to. At the time of writing this article, Kubernetes doesn’t have any mechanism to create or manage users inside the cluster. They need to be created and managed externally. Now let’s see Kubernetes RBAC in action.
+
+RBAC Kubernetes demo in action:
+What we will do here is, create a user that will be allowed to do some tasks or access only some resources from a namespace. This user should not be able to perform any other tasks or access to any other resources.
+
+I have used a minikube cluster to demonstrate this, but as long as you have a healthy Kubernetes cluster running, things should work for you too. If you are interested, below is my specific minikube version.
+
+Kubernetes v1.14.2 on Docker 18.09.6
+minikube version: v1.1.0
+Let’s create a namespace first.
+
+$ kubectl create namespace development
+namespace/development created
+Create client certificate for authentication
+Since we know that any client can access Kubernetes (without right RBAC) cluster by authenticating themselves to the kube-apiserver using SSL based authentication mechanism. We will have to generate private key and X-509 client certificate in order to authenticate a user with name DevUser to the kube-apiserver. This user will be working on the development namespace. Let’s create private key and a CSR (Certificate Signing Request) for this DevUser
+
+$ cd ${HOME}/.kube
+$ openssl genrsa -out DevUser.key 2048
+Generating RSA private key, 2048 bit long modulus (2 primes)
+
+$ openssl req -new -key DevUser.key -out DevUser.csr -subj "/CN=DevUser/O=development"
+The common name (CN) of the subject will be used as username for authentication request. The organization field (O) will be used to indicate group membership of the user.
+
+Once we have private key and CSR, we will have to self sign that CSR to generate the certificate. We will have to provide CA keys of Kubernetes cluster to generate the certificate, as the CA is already approved by minikube cluster.
+
+$ openssl x509 -req -in DevUser.csr -CA ${HOME}/.minikube/ca.crt -CAkey ${HOME}/.minikube/ca.key  -CAcreateserial -out DevUser.crt -days 45
+Signature ok
+subject=CN = DevUser, O = development
+Getting CA Private Key
+Please make sure to provide correct set of CA certificate and key. To know this, you can run kubectl config view and get the details.
+
+How do you configure kubectl?
+Now that you have a user (DevUser), private key and a certificate to connect to the kube-apiserver, it’s time that we configure these details in a config file i.e. Kubeconfig. We can use these details to query resources from Kubernetes cluster. We can either manually configure these details or use kubectl client to make changes in the config file. Kubeconfig file is like any other Kubernetes resource manifest and has three main sections: clusters, contexts and users. As the name suggests clusters section of kubeconfig file will have the details of clusters. The users section will have details of the user and the context section will have the relationship between cluster and the user. We have another field in the config file that tells us the current configured context. If we don’t provide any context while using kubectl, this context will be used.
+
+Here is an example of the kubeconfig file that I have.
+
+# cat ~/.kube/config
+
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority: /home/vivek/.minikube/ca.crt
+    server: https://192.168.99.100:8443
+  name: minikube
+contexts:
+- context:
+    cluster: minikube
+    user: minikube
+  name: minikube
+current-context: minikube
+kind: Config
+preferences: {}
+users:
+- name: minikube
+  user:
+    client-certificate: /home/vivek/.minikube/client.crt
+    client-key: /home/vivek/.minikube/client.key
+Add entry to users section
+Let’s go ahead and add the user that we have created. To add the user in the Kubeconfig file, we can execute below command (set-credentials). Please make sure that you provide the correct path to the private key and the certificate of DevUser.
+
+$ kubectl config set-credentials DevUser --client-certificate ${HOME}/.kube/DevUser.crt --client-key ${HOME}/.kube/DevUser.key
+User "DevUser" set.
+and now if we see the config file using the kubectl config view command, we will be able to see the new user added under the users section.
+
+$ kubectl config view
+…
+users:
+- name: DevUser
+  user:
+    client-certificate: DevUser.crt
+    client-key: DevUser.key
+- name: minikube
+  user:
+    client-certificate: /home/vivek/.minikube/client.crt
+    client-key: /home/vivek/.minikube/client.key
+Add entry to contexts section
+The next step is to add a context in the config file, that will allow this user (DevUser) to access the development namespace in the cluster. Use below command to do the same:
+
+$ kubectl config set-context DevUser-context --cluster=minikube --namespace=development --user=DevUser
+Context "DevUser-context" created.
+Verify if another context has been added to the config file.
+
+# cat ~/.kube/config
+…
+contexts:
+- context:
+    cluster: minikube
+    namespace: development
+    user: DevUser
+  name: DevUser-context
+- context:
+    cluster: minikube
+    user: minikube
+  name: minikube
+How to add more RBAC permissions to the user?
+Running kubectl get pods will return the resources of the namespace default for the current context that is minikube. But if we change the context DevUser-context, we will not be able to access the resources. So, running kubectl get pods with new context will result in below error
+
+$ kubectl get pods --context=DevUser-context
+Error from server (Forbidden): pods is forbidden: User "DevUser" cannot list resource "pods" in API group "" in the namespace "development"
+To enable this newly created user to access to only pods in development namespace, let’s create a role and then bind that role to the DevUser using rolebinding resource. Role is like any other Kubernetes resource. It decides the resources and the actions that someone will be able to take if they have that role. Create a role resource using below manifest:
+
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: dev-role
+  namespace: development
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "update", "list"]
+We are just providing the verbs get, update and list. This makes sure that the DevUser will only be able to do get, update and list activities on the pods and nothing else.
+
+Bind the role that we have created above to DevUser, using rolebinding resource, with below manifest:
+
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: dev-DevUser
+  namespace: development
+subjects:
+- kind: User
+  name: DevUser
+  apiGroup: ""
+roleRef:
+  kind: Role
+  name: dev-role
+  apiGroup: ""
+So, you can see here we are associating the role dev-role (that we have created earlier) to DevUser.
+
+After creating the role and rolebinding let’s try to list the pods again. We will successfully be able to list them.
+
+$ kubectl get pods --context=DevUser-context
+No resources found.
+# we are not able to see any resources because we don't have any pods running
+# in development namespace
+As you can see, now we are able to list the resources using newly created context. We know that the DevUser should only be able to get, update and list the pods. Let’s try to create a pod using this context.
+
+$ kubectl run nginx --image=nginx --context=DevUser-context
+Error from server (Forbidden): deployments.apps is forbidden: User "DevUser" cannot create resource "deployments" in API group "apps" in the namespace "development"
+Similarly, if you try to delete a running pod using this context you will not be able to do so. If you want to enable this user to create and delete as well, you will just have to change the role that is assigned to this user. Make sure that you have correct resources and the verbs in the role.
+
+Repeat these steps, if you want to enable another user to have access to your cluster.
+
+That’s a wrap! Hope this was helpful to you. Do try setting up Kubernetes RBAC process and share your experiences with me via Twitter.
+
+For regular dose of informative blogs like this, follow us InfraCloud on Twitter and LinkedIn.
+
+Looking for help with Kubernetes adoption or Day 2 operations? learn more about our capabilities and why startups & enterprises consider as one of the best Kubernetes consulting services companies.
